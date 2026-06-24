@@ -12,6 +12,7 @@ import * as XLSX from "xlsx";
 
 import { prisma } from "@/lib/db/prisma";
 import { calculateProjectPayout } from "@/lib/payments/payout";
+import { writeActivityLog } from "@/lib/activity-log/log";
 
 const monthNames = new Set([
   "january",
@@ -142,98 +143,120 @@ export async function importSpreadsheet(input: {
   let skipped = 0;
   const warnings: string[] = [];
 
-  await prisma.$transaction(async (tx) => {
-    for (const sheetName of workbook.SheetNames) {
-      const worksheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
-        header: 1,
-        blankrows: false,
-        raw: true
-      });
+  for (const sheetName of workbook.SheetNames) {
+    const worksheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+      header: 1,
+      blankrows: false,
+      raw: true
+    });
 
-      const fallbackEmail = `${sheetName.toLowerCase().replace(/\s+/g, ".")}@internal.local`;
-      const existingUser = await tx.user.findFirst({
-        where: {
-          OR: [{ name: sheetName }, { email: fallbackEmail }]
-        }
-      });
+    const fallbackEmail = `${sheetName.toLowerCase().replace(/\s+/g, ".")}@internal.local`;
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [{ name: sheetName }, { email: fallbackEmail }]
+      }
+    });
 
-      const user =
-        existingUser ??
-        (await tx.user.create({
+    if (!user) {
+      try {
+        user = await prisma.user.create({
           data: {
             name: sheetName,
             email: fallbackEmail,
             role: sheetName === "Ali Masrafi" ? UserRole.ADMIN : UserRole.TEAM_MEMBER
           }
-        }));
-
-      for (const [index, row] of rows.entries()) {
-        const sourceRowNumber = index + 1;
-        const workAssignDate = excelDateToDate(row[0]);
-
-        if (shouldSkipRow(row[0]) || !workAssignDate) {
-          skipped += 1;
-          continue;
-        }
-
-        const deliveredDate = excelDateToDate(row[4]);
-        const { paymentAmount, paymentCurrency, paymentRaw } = parsePayment(row[5]);
-        const withdraw = normalizeWithdraw(row[6], paymentAmount);
-        const payout = calculateProjectPayout({
-          workerName: sheetName,
-          workAssignDate,
-          paymentAmount,
-          paymentCurrency
         });
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === "P2002"
+        ) {
+          user = await prisma.user.findFirst({
+            where: {
+              OR: [{ name: sheetName }, { email: fallbackEmail }]
+            }
+          });
 
-        const sourceKey = {
-          sourceSheetName_sourceRowNumber: {
-            sourceSheetName: sheetName,
-            sourceRowNumber
+          if (!user) {
+            throw error;
           }
-        };
-
-        const existing = await tx.project.findUnique({ where: sourceKey });
-        if (existing) {
-          skipped += 1;
-          continue;
+        } else {
+          throw error;
         }
+      }
+    }
 
-        const project = await tx.project.create({
-          data: {
-            assignedUserId: user.id,
-            workAssignDate,
-            quantity: row[1] ? Number(row[1]) : null,
-            originalWebsiteLink: cleanText(row[2]) ?? "",
-            flazioWebsiteLink: cleanText(row[3]) ?? "",
-            deliveredDate,
-            paymentAmount: new Prisma.Decimal(paymentAmount),
-            paymentCurrency,
-            paymentRaw,
-            workerPayAmount: new Prisma.Decimal(payout.workerPayAmount),
-            ownerCutAmount: new Prisma.Decimal(payout.ownerCutAmount),
-            paymentWithdrawRaw: withdraw.paymentWithdrawRaw,
-            withdrawStatus: withdraw.withdrawStatus,
-            withdrawnAmount: new Prisma.Decimal(withdraw.withdrawnAmount),
-            workStatus: normalizeWorkStatus(row[7]),
-            paymentStatus: normalizePaymentStatus(row[8]),
-            payPlatform: normalizePayPlatform(row[9]),
-            payoneerPaymentRequestId: cleanText(row[10]),
-            invoice: cleanText(row[11]),
-            sourceSheetName: sheetName,
-            sourceRowNumber
-          }
-        });
+    for (const [index, row] of rows.entries()) {
+      const sourceRowNumber = index + 1;
+      const workAssignDate = excelDateToDate(row[0]);
 
-        await tx.activityLog.create({
-          data: {
-            projectId: project.id,
+      if (shouldSkipRow(row[0]) || !workAssignDate) {
+        skipped += 1;
+        continue;
+      }
+
+      const deliveredDate = excelDateToDate(row[4]);
+      const { paymentAmount, paymentCurrency, paymentRaw } = parsePayment(row[5]);
+      const withdraw = normalizeWithdraw(row[6], paymentAmount);
+      const payout = calculateProjectPayout({
+        workerName: sheetName,
+        workAssignDate,
+        paymentAmount,
+        paymentCurrency
+      });
+
+      const sourceKey = {
+        sourceSheetName_sourceRowNumber: {
+          sourceSheetName: sheetName,
+          sourceRowNumber
+        }
+      };
+
+      const existing = await prisma.project.findUnique({ where: sourceKey });
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const project = await prisma.$transaction(async (tx) => {
+          const createdProject = await tx.project.create({
+            data: {
+              assignedUserId: user!.id,
+              workAssignDate,
+              quantity: row[1] ? Number(row[1]) : null,
+              originalWebsiteLink: cleanText(row[2]) ?? "",
+              flazioWebsiteLink: cleanText(row[3]) ?? "",
+              deliveredDate,
+              paymentAmount: new Prisma.Decimal(paymentAmount),
+              paymentCurrency,
+              paymentRaw,
+              workerPayAmount: new Prisma.Decimal(payout.workerPayAmount),
+              ownerCutAmount: new Prisma.Decimal(payout.ownerCutAmount),
+              paymentWithdrawRaw: withdraw.paymentWithdrawRaw,
+              withdrawStatus: withdraw.withdrawStatus,
+              withdrawnAmount: new Prisma.Decimal(withdraw.withdrawnAmount),
+              workStatus: normalizeWorkStatus(row[7]),
+              paymentStatus: normalizePaymentStatus(row[8]),
+              payPlatform: normalizePayPlatform(row[9]),
+              payoneerPaymentRequestId: cleanText(row[10]),
+              invoice: cleanText(row[11]),
+              sourceSheetName: sheetName,
+              sourceRowNumber
+            }
+          });
+
+          await writeActivityLog({
+            projectId: createdProject.id,
             actorUserId: input.actorUserId,
             action: ActivityAction.IMPORT,
             fieldName: "project",
-            newValue: `${sheetName}:${sourceRowNumber}`
-          }
+            newValue: `${sheetName}:${sourceRowNumber}`,
+            tx
+          });
+
+          return createdProject;
         });
 
         if (deliveredDate && deliveredDate < workAssignDate) {
@@ -243,9 +266,18 @@ export async function importSpreadsheet(input: {
         }
 
         imported += 1;
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === "P2002"
+        ) {
+          skipped += 1;
+          continue;
+        }
+        throw error;
       }
     }
-  });
+  }
 
   return { imported, skipped, warnings };
 }
