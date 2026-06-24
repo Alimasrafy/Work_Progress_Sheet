@@ -1,0 +1,136 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  TEAM_MEMBER
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum WorkStatus {
+  DELIVERED
+  IN_PROGRESS
+  PENDING
+  CANCELLED
+}
+
+enum PaymentStatus {
+  DONE
+  PENDING
+}
+
+enum PayPlatform {
+  FIVERR
+  PAYONEER
+  OTHER
+}
+
+enum PaymentCurrency {
+  USD
+  EUR
+}
+
+enum WithdrawStatus {
+  WITHDRAWN
+  NOT_WITHDRAWN
+  PARTIAL
+}
+
+enum ActivityAction {
+  CREATE
+  UPDATE
+  IMPORT
+  ARCHIVE
+  RESTORE
+}
+
+model User {
+  id            String        @id @default(cuid())
+  name          String
+  email         String        @unique
+  passwordHash  String?
+  role          UserRole      @default(TEAM_MEMBER)
+  status        UserStatus    @default(ACTIVE)
+  projects      Project[]     @relation("AssignedProjects")
+  activityLogs  ActivityLog[] @relation("ActorActivityLogs")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model Project {
+  id                       String          @id @default(cuid())
+  assignedUserId           String
+  assignedUser             User            @relation("AssignedProjects", fields: [assignedUserId], references: [id])
+  workAssignDate           DateTime
+  quantity                 Int?
+  originalWebsiteLink      String
+  flazioWebsiteLink        String
+  deliveredDate            DateTime?
+  paymentAmount            Decimal
+  paymentCurrency          PaymentCurrency
+  paymentRaw               String
+  workerPayAmount          Decimal         @default(0)
+  ownerCutAmount           Decimal         @default(0)
+  paymentWithdrawRaw       String?
+  withdrawStatus           WithdrawStatus  @default(NOT_WITHDRAWN)
+  withdrawnAmount          Decimal         @default(0)
+  workStatus               WorkStatus      @default(DELIVERED)
+  paymentStatus            PaymentStatus   @default(PENDING)
+  payPlatform              PayPlatform
+  payoneerPaymentRequestId String?
+  invoice                  String?
+  sourceSheetName          String?
+  sourceRowNumber          Int?
+  archivedAt               DateTime?
+  activityLogs             ActivityLog[]
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
+  @@unique([sourceSheetName, sourceRowNumber])
+  @@index([assignedUserId])
+  @@index([workAssignDate])
+  @@index([paymentStatus])
+  @@index([workStatus])
+  @@index([payPlatform])
+  @@index([payoneerPaymentRequestId])
+  @@index([invoice])
+  @@index([assignedUserId, workAssignDate])
+  @@index([paymentStatus, workAssignDate])
+  @@index([payPlatform, payoneerPaymentRequestId])
+}
+
+model ActivityLog {
+  id          String         @id @default(cuid())
+  projectId   String?
+  project     Project?       @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  actorUserId String?
+  actor       User?          @relation("ActorActivityLogs", fields: [actorUserId], references: [id], onDelete: SetNull)
+  fieldName   String?
+  oldValue    String?
+  newValue    String?
+  action      ActivityAction
+  createdAt   DateTime       @default(now())
+
+  @@index([projectId])
+  @@index([actorUserId])
+  @@index([createdAt])
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
